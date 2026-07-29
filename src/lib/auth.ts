@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { AppUser, UserRole, ExportRequest, DistrictDataToggle, EmisSharingGrant, DistrictMeeting, DistrictMeetingInvitation, DataToggleAuditLog, DistrictChatConversation } from './types';
+import type { AppUser, UserRole, ExportRequest, DistrictDataToggle, EmisSharingGrant, DistrictMeeting, DistrictMeetingInvitation, DataToggleAuditLog, DistrictChatConversation, PendingOfficeRegistration } from './types';
 
 /**
  * SchoolPortal-GES authenticates with phone + PIN. Supabase Auth is
@@ -59,6 +59,9 @@ export async function loginWithPhonePin(phone: string, pin: string): Promise<Log
   if (!profile) throw new Error('Your account record was not found. Please contact support.');
   if (!profile.is_active) {
     await supabase.auth.signOut();
+    if (profile.approval_status === 'pending') {
+      throw new Error('Your account is pending Super Admin approval. Please try again later.');
+    }
     throw new Error('Your account has been deactivated. Please contact your school administrator.');
   }
 
@@ -339,9 +342,17 @@ export interface RegisterOfficeUserInput {
   role: string;
   officeDesignation: string;
   districtId: string;
+  portfolios: string[];
+  officialEmail?: string;
+  whatsappNumber?: string;
 }
 
 export async function registerOfficeUser(input: RegisterOfficeUserInput): Promise<string> {
+  const { data: session } = await supabase.auth.getSession();
+  const currentUser = session.session?.user;
+  const { data: currentUserProfile } = await supabase.from('users').select('role').eq('id', currentUser?.id).maybeSingle();
+  const isSuperAdmin = currentUserProfile?.role === 'super_admin';
+
   const authData = await callAuthOps({
     action: 'create_user',
     phone: input.phone,
@@ -352,25 +363,108 @@ export async function registerOfficeUser(input: RegisterOfficeUserInput): Promis
     district_id: input.districtId,
   });
   const authId = (authData as { id: string }).id;
-  const { error } = await supabase.from('users').insert({
+
+  const insertData: Record<string, unknown> = {
     id: authId,
-    created_by: null,
+    created_by: currentUser?.id ?? null,
     phone: input.phone,
     full_name: input.name,
     role: input.role,
     profile_completed: false,
-    is_active: true,
+    is_active: isSuperAdmin,
     must_change_pin: true,
     office_designation: input.officeDesignation,
     district_id: input.districtId,
+    portfolios: input.portfolios,
+    official_email: input.officialEmail ?? null,
+    whatsapp_number: input.whatsappNumber ?? null,
+    approval_status: isSuperAdmin ? 'approved' : 'pending',
     sync_status: 'confirmed',
     deleted: false,
-  });
+  };
+
+  const { error } = await supabase.from('users').insert(insertData);
   if (error) {
     await callAuthOps({ action: 'delete_user', user_id: authId }).catch(() => {});
     throw new Error(extractRpcMessage(error.message));
   }
+
+  if (!isSuperAdmin) {
+    await supabase.from('pending_office_registrations').insert({
+      registered_by: currentUser?.id,
+      full_name: input.name,
+      phone: input.phone,
+      role: input.role,
+      portfolios: input.portfolios,
+      district_id: input.districtId,
+      status: 'pending',
+    });
+  }
+
   return authId;
+}
+
+export async function getPendingOfficeRegistrations(): Promise<import('./types').PendingOfficeRegistration[]> {
+  const { data, error } = await supabase
+    .from('pending_office_registrations')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) throw new Error(extractRpcMessage(error.message));
+  return (data as import('./types').PendingOfficeRegistration[]) ?? [];
+}
+
+export async function approvePendingRegistration(regId: string): Promise<void> {
+  const { data: reg } = await supabase
+    .from('pending_office_registrations')
+    .select('*')
+    .eq('id', regId)
+    .maybeSingle();
+  if (!reg) throw new Error('Registration not found.');
+  const { data: session } = await supabase.auth.getSession();
+  const adminId = session.session?.user.id;
+  await supabase.from('users')
+    .update({ is_active: true, approval_status: 'approved', approved_by: adminId, approved_at: new Date().toISOString() })
+    .eq('phone', reg.phone)
+    .eq('approval_status', 'pending');
+  await supabase.from('pending_office_registrations')
+    .update({ status: 'approved', resolved_at: new Date().toISOString(), resolved_by: adminId })
+    .eq('id', regId);
+}
+
+export async function rejectPendingRegistration(regId: string): Promise<void> {
+  const { data: reg } = await supabase
+    .from('pending_office_registrations')
+    .select('*')
+    .eq('id', regId)
+    .maybeSingle();
+  if (!reg) throw new Error('Registration not found.');
+  const { data: session } = await supabase.auth.getSession();
+  const adminId = session.session?.user.id;
+  const { data: userData } = await supabase.from('users').select('id').eq('phone', reg.phone).maybeSingle();
+  if (userData?.id) {
+    await callAuthOps({ action: 'delete_user', user_id: userData.id }).catch(() => {});
+    await supabase.from('users').update({ deleted: true, is_active: false, approval_status: 'rejected' }).eq('id', userData.id);
+  }
+  await supabase.from('pending_office_registrations')
+    .update({ status: 'rejected', resolved_at: new Date().toISOString(), resolved_by: adminId })
+    .eq('id', regId);
+}
+
+export async function updateUserPortfolios(userId: string, portfolios: string[]): Promise<void> {
+  const { error } = await supabase.from('users').update({ portfolios }).eq('id', userId);
+  if (error) throw new Error(extractRpcMessage(error.message));
+}
+
+export async function getDistrictOfficeUsers(districtId?: string): Promise<AppUser[]> {
+  let query = supabase
+    .from('users')
+    .select('*')
+    .in('role', ['emis_officer', 'district_director', 'director_admin', 'director_hr', 'circuit_supervisor', 'district_education_officer'])
+    .eq('deleted', false);
+  if (districtId) query = query.eq('district_id', districtId);
+  const { data, error } = await query.order('full_name', { ascending: true });
+  if (error) throw new Error(extractRpcMessage(error.message));
+  return (data as AppUser[]) ?? [];
 }
 
 // ---- District Data Sharing toggles ----
@@ -593,20 +687,6 @@ export async function createDistrictGroupChat(name: string, participantIds: stri
   }));
   const { error } = await supabase.from('district_chat_participants').insert(inserts);
   if (error) throw new Error(extractRpcMessage(error.message));
-}
-
-// ---- Get all office users in district ----
-export async function getDistrictOfficeUsers(districtId?: string): Promise<AppUser[]> {
-  let query = supabase
-    .from('users')
-    .select('*')
-    .in('role', ['emis_officer', 'district_director', 'director_admin', 'director_hr', 'circuit_supervisor', 'district_education_officer'])
-    .eq('deleted', false)
-    .eq('is_active', true);
-  if (districtId) query = query.eq('district_id', districtId);
-  const { data, error } = await query.order('full_name', { ascending: true });
-  if (error) throw new Error(extractRpcMessage(error.message));
-  return (data as AppUser[]) ?? [];
 }
 
 // ---- Get all headteachers in a district ----
