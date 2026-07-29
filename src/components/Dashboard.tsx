@@ -4,10 +4,47 @@ import { useNav, type RouteId } from '@/lib/nav-context';
 import { AppShell } from './AppShell';
 import { Logo } from './Logo';
 import { EmptyState, Spinner } from './ui';
-import { ROLE_LABELS } from '@/lib/constants';
+import { ROLE_LABELS, SENIOR_OFFICE_ROLES, PORTFOLIO_LABELS, hasPortfolio, HR_PORTFOLIOS, FINANCE_PORTFOLIOS, CURRICULUM_PORTFOLIOS, FOCAL_PORTFOLIOS, canRegisterOfficeUsers } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
 import type { AppUser, School } from '@/lib/types';
-import { School as SchoolIcon, Users, ClipboardList, BookOpen, Wallet, Megaphone, MessagesSquare, LayoutGrid, CalendarDays, Siren, Palmtree, Bell, ScrollText, FileText, Shield, Building2 } from 'lucide-react';
+import { School as SchoolIcon, Users, ClipboardList, BookOpen, Wallet, Megaphone, MessagesSquare, LayoutGrid, CalendarDays, Siren, Palmtree, Bell, ScrollText, FileText, Shield, Building2, Briefcase } from 'lucide-react';
+
+function buildOfficeFeatures(user: AppUser): Feature[] {
+  const features: Feature[] = [];
+  const portfolios = user.portfolios ?? [];
+  const isSenior = SENIOR_OFFICE_ROLES.includes(user.role as typeof SENIOR_OFFICE_ROLES[number]);
+  const hasEmis = hasPortfolio({ portfolios, role: user.role }, 'statistics_emis');
+  const hasReg = portfolios.includes('registry_secretarial');
+  const hasPR = portfolios.includes('public_relations');
+  const hasAudit = portfolios.includes('internal_audit');
+  const hasHR = portfolios.some((p) => HR_PORTFOLIOS.includes(p));
+  const hasFinance = portfolios.some((p) => FINANCE_PORTFOLIOS.includes(p));
+  const hasCurriculum = portfolios.some((p) => CURRICULUM_PORTFOLIOS.includes(p));
+  const hasFocal = portfolios.some((p) => FOCAL_PORTFOLIOS.includes(p));
+
+  if (hasEmis) {
+    features.push({ label: 'School Data', desc: 'Full district data overview', icon: Building2, route: 'school-data-view' });
+    features.push({ label: 'Data Sharing Controls', desc: 'Manage officer data access', icon: Shield, route: 'emis-sharing' });
+  } else if (isSenior || portfolios.length > 0) {
+    features.push({ label: 'School Data', desc: 'View shared school data', icon: Building2, route: 'school-data-view' });
+  }
+
+  if (hasHR) features.push({ label: 'Staff Data', desc: 'Staff-related HR data', icon: Users, route: 'school-data-view' });
+  if (hasFinance) features.push({ label: 'Levy Summaries', desc: 'Levy collection summary data', icon: Wallet, route: 'school-data-view' });
+  if (hasCurriculum) features.push({ label: 'Academic Data', desc: 'Academic and enrollment data', icon: BookOpen, route: 'school-data-view' });
+  if (hasFocal) features.push({ label: 'Focal Area Data', desc: 'Pupil and school data for your focal area', icon: Briefcase, route: 'school-data-view' });
+  if (hasAudit) features.push({ label: 'Audit Summaries', desc: 'Financial and levy audit summaries', icon: ScrollText, route: 'school-data-view' });
+  if (hasReg || hasPR || isSenior) {
+    features.push({ label: 'Office Notices', desc: 'Send and manage notices', icon: Megaphone, route: 'office-notices' });
+  }
+  if (canRegisterOfficeUsers(user.role, portfolios)) {
+    features.push({ label: 'Office Users', desc: 'Register and manage office staff', icon: Users, route: 'office-users' });
+  }
+
+  features.push({ label: 'District Meetings', desc: 'Schedule and join meetings', icon: CalendarDays, route: 'district-meetings' });
+  features.push({ label: 'District Chat', desc: 'Office messaging', icon: MessagesSquare, route: 'district-chat' });
+  return features;
+}
 
 export function Dashboard() {
   const { user } = useAuth();
@@ -15,8 +52,10 @@ export function Dashboard() {
   if (!user) return null;
 
   const title =
-    user.role === 'super_admin' ? 'Super Admin Dashboard'
-      : user.role === 'parent' ? 'Parent Dashboard'
+    user.role === 'super_admin'
+      ? 'Super Admin Dashboard'
+      : user.role === 'parent'
+      ? 'Parent Dashboard'
       : `${ROLE_LABELS[user.role]} Dashboard`;
 
   return (
@@ -32,17 +71,26 @@ export function Dashboard() {
 function WelcomeCard({ user }: { user: AppUser }) {
   const [school, setSchool] = useState<School | null>(null);
   const [loading, setLoading] = useState(true);
+
   useEffect(() => {
     let active = true;
     (async () => {
-      if (!user.school_id) { if (active) setLoading(false); return; }
+      if (!user.school_id) {
+        if (active) setLoading(false);
+        return;
+      }
       const { data } = await supabase.from('schools').select('*').eq('id', user.school_id).maybeSingle();
-      if (active) { setSchool(data as School | null); setLoading(false); }
+      if (active) {
+        setSchool(data as School | null);
+        setLoading(false);
+      }
     })();
     return () => { active = false; };
   }, [user.school_id]);
+
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+
   return (
     <div className="card overflow-hidden">
       <div className="px-5 py-6 text-white" style={{ background: 'linear-gradient(135deg, var(--color-primary), var(--color-accent))' }}>
@@ -106,25 +154,8 @@ function RoleTools({ user, navigate }: { user: AppUser; navigate: (r: RouteId) =
       { label: 'District Chat', desc: 'Meeting group chats', icon: MessagesSquare, route: 'district-chat' },
       { label: 'Audit Logs', desc: 'View admin actions', icon: ScrollText, route: 'audit-logs' },
     ];
-  } else if (user.role === 'emis_officer') {
-    features = [
-      { label: 'School Data', desc: 'View approved school data', icon: Building2, route: 'school-data-view' },
-      { label: 'Data Sharing Controls', desc: 'Manage officer data access', icon: Shield, route: 'emis-sharing' },
-      { label: 'District Meetings', desc: 'Schedule and manage meetings', icon: CalendarDays, route: 'district-meetings' },
-      { label: 'District Chat', desc: 'Office messaging', icon: MessagesSquare, route: 'district-chat' },
-    ];
-  } else if (user.role === 'district_director') {
-    features = [
-      { label: 'School Data', desc: 'View approved school data', icon: Building2, route: 'school-data-view' },
-      { label: 'District Meetings', desc: 'Schedule and manage meetings', icon: CalendarDays, route: 'district-meetings' },
-      { label: 'District Chat', desc: 'Office messaging', icon: MessagesSquare, route: 'district-chat' },
-    ];
-  } else if (['director_admin', 'director_hr', 'circuit_supervisor', 'district_education_officer'].includes(user.role)) {
-    features = [
-      { label: 'School Data', desc: 'View shared school data', icon: Building2, route: 'school-data-view' },
-      { label: 'District Meetings', desc: 'View and join meetings', icon: CalendarDays, route: 'district-meetings' },
-      { label: 'District Chat', desc: 'Office messaging', icon: MessagesSquare, route: 'district-chat' },
-    ];
+  } else if (user.role === 'emis_officer' || SENIOR_OFFICE_ROLES.includes(user.role as typeof SENIOR_OFFICE_ROLES[number]) || user.role === 'circuit_supervisor' || user.role === 'district_education_officer') {
+    features = buildOfficeFeatures(user);
   } else if (user.role === 'staff') {
     features = [
       { label: 'Academic Records', desc: 'Enter scores, fill report cards', icon: BookOpen, route: 'academic-records' },
@@ -144,6 +175,7 @@ function RoleTools({ user, navigate }: { user: AppUser; navigate: (r: RouteId) =
       { label: 'Emergency Alerts', desc: 'View alerts', icon: Siren, route: 'emergency-alerts' },
     ];
   }
+
   return (
     <section>
       <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
@@ -154,8 +186,14 @@ function RoleTools({ user, navigate }: { user: AppUser; navigate: (r: RouteId) =
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((f) => (
-            <button key={f.label} onClick={() => navigate(f.route)} className="card group flex flex-col items-start p-4 text-left transition hover:border-primary-400 hover:shadow-md">
-              <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300"><f.icon size={20} /></div>
+            <button
+              key={f.label}
+              onClick={() => navigate(f.route)}
+              className="card group flex flex-col items-start p-4 text-left transition hover:border-primary-400 hover:shadow-md"
+            >
+              <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-lg bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">
+                <f.icon size={20} />
+              </div>
               <p className="font-medium text-gray-900 dark:text-gray-100">{f.label}</p>
               <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{f.desc}</p>
             </button>
@@ -171,21 +209,44 @@ function ParentChildList() {
   const { navigate } = useNav();
   const [loading, setLoading] = useState(true);
   const [links, setLinks] = useState<{ pupil_id: string; pupil: { full_name: string; current_class_name: string | null } }[]>([]);
+
   useEffect(() => {
     let active = true;
     (async () => {
-      const { data } = await supabase.from('parent_pupil_links').select('pupil_id, pupil:pupils(full_name, current_class_name)').eq('parent_id', user?.id).eq('blocked', false);
-      if (active) { setLinks((data as never) ?? []); setLoading(false); }
+      const { data } = await supabase
+        .from('parent_pupil_links')
+        .select('pupil_id, pupil:pupils(full_name, current_class_name)')
+        .eq('parent_id', user?.id)
+        .eq('blocked', false);
+      if (active) {
+        setLinks((data as never) ?? []);
+        setLoading(false);
+      }
     })();
     return () => { active = false; };
   }, [user?.id]);
+
   if (loading) return <div className="flex justify-center py-8"><Spinner className="text-primary-600" /></div>;
-  if (links.length === 0) return <EmptyState title="No children linked yet" message="Once your school links your child to your account, their records will appear here." />;
+  if (links.length === 0) {
+    return (
+      <EmptyState
+        title="No children linked yet"
+        message="Once your school links your child to your account, their records will appear here."
+      />
+    );
+  }
   return (
     <div className="space-y-3">
       {links.map((l) => (
-        <button key={l.pupil_id} onClick={() => navigate('pupils', { pupilId: l.pupil_id })} className="card flex w-full items-center justify-between p-4 text-left transition hover:border-primary-400">
-          <div><p className="font-semibold text-gray-900 dark:text-gray-100">{l.pupil?.full_name}</p><p className="text-sm text-gray-500 dark:text-gray-400">{l.pupil?.current_class_name ?? 'Class not set'}</p></div>
+        <button
+          key={l.pupil_id}
+          onClick={() => navigate('pupils', { pupilId: l.pupil_id })}
+          className="card flex w-full items-center justify-between p-4 text-left transition hover:border-primary-400"
+        >
+          <div>
+            <p className="font-semibold text-gray-900 dark:text-gray-100">{l.pupil?.full_name}</p>
+            <p className="text-sm text-gray-500 dark:text-gray-400">{l.pupil?.current_class_name ?? 'Class not set'}</p>
+          </div>
           <span className="text-primary-600" style={{ color: 'var(--color-primary)' }}>View ›</span>
         </button>
       ))}
