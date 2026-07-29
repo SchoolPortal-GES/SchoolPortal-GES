@@ -33,6 +33,7 @@ import {
   DistrictMeetingsScreen,
   DistrictChatScreen,
   SchoolDataViewScreen,
+  OfficeNoticesScreen,
 } from '@/components/OfficeScreens';
 
 function AppRoutes() {
@@ -82,6 +83,7 @@ function AppRoutes() {
     case 'district-meetings': screen = <DistrictMeetingsScreen onBack={goHome} />; break;
     case 'district-chat': screen = <DistrictChatScreen onBack={goHome} />; break;
     case 'school-data-view': screen = <SchoolDataViewScreen onBack={goHome} />; break;
+    case 'office-notices': screen = <OfficeNoticesScreen onBack={goHome} />; break;
     default: screen = <Dashboard />;
   }
 
