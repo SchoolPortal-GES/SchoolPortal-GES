@@ -1,25 +1,54 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Music, Play, Pause, SkipBack, SkipForward, Volume2, Shuffle, Repeat, X, FolderOpen, Trash2, FileAudio, AlertCircle } from 'lucide-react';
+import { Music, Play, Pause, SkipBack, SkipForward, Volume2, Shuffle, Repeat, X, FolderOpen, Trash2, FileAudio, AlertCircle, ListMusic } from 'lucide-react';
 
 interface LoadedTrack {
   name: string;
   url: string;
   size: number;
   fileName: string;
+  lastModified: number;
+  duration: number;
 }
 
-interface SavedSession {
-  trackIndex: number;
-  position: number;
-  shuffle: boolean;
-  repeat: boolean;
-  volume: number;
-  trackNames: string[];
-  hasPrevious: boolean;
+interface SavedTrackMeta {
+  fileName: string;
+  fileSize: number;
+  lastModified: number;
 }
 
-const STORAGE_KEY = 'music_player_session';
-const FOLDER_KEY = 'music_player_folder_name';
+const STORAGE_KEYS = {
+  playlist: 'schoolportal_music_playlist',
+  currentTrack: 'schoolportal_music_current_track',
+  position: 'schoolportal_music_position',
+  shuffle: 'schoolportal_music_shuffle',
+  repeat: 'schoolportal_music_repeat',
+  volume: 'schoolportal_music_volume',
+};
+
+function lsAvailable(): boolean {
+  try {
+    const t = '__sp_test__';
+    localStorage.setItem(t, t);
+    localStorage.removeItem(t);
+    return true;
+  } catch { return false; }
+}
+
+const HAS_LS = lsAvailable();
+
+function lsGet<T>(key: string, fallback: T): T {
+  if (!HAS_LS) return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return JSON.parse(raw) as T;
+  } catch { return fallback; }
+}
+
+function lsSet(key: string, value: unknown): void {
+  if (!HAS_LS) return;
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+}
 
 function formatTime(s: number): string {
   if (!s || isNaN(s)) return '0:00';
@@ -34,81 +63,136 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function loadSession(): SavedSession | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as SavedSession;
-  } catch { return null; }
-}
-
-function saveSession(data: SavedSession): void {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+function stripExt(name: string): string {
+  return name.replace(/\.[^.]+$/, '');
 }
 
 export function MusicPlayer() {
   const [open, setOpen] = useState(false);
+  const [showPlaylist, setShowPlaylist] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const [pos, setPos] = useState({ x: window.innerWidth - 56, y: window.innerHeight - 120 });
   const [tracks, setTracks] = useState<LoadedTrack[]>([]);
   const [trackIndex, setTrackIndex] = useState(0);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(70);
-  const [shuffle, setShuffle] = useState(false);
-  const [repeat, setRepeat] = useState(false);
-  const [missingFile, setMissingFile] = useState<string | null>(null);
-  const [hasResumeSession, setHasResumeSession] = useState(false);
-  const [autoLoaded, setAutoLoaded] = useState(false);
+  const [volume, setVolume] = useState(() => {
+    const v = lsGet<number>(STORAGE_KEYS.volume, 70);
+    return typeof v === 'number' ? v : 70;
+  });
+  const [shuffle, setShuffle] = useState(() => lsGet<boolean>(STORAGE_KEYS.shuffle, false));
+  const [repeat, setRepeat] = useState(() => lsGet<boolean>(STORAGE_KEYS.repeat, false));
+  const [needsReselect, setNeedsReselect] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const preloadRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const dirInputRef = useRef<HTMLInputElement | null>(null);
   const objectUrlsRef = useRef<string[]>([]);
   const playedHistoryRef = useRef<number[]>([]);
-  const savingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const positionSaveRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resumePositionRef = useRef<number>(0);
   const shouldResumeRef = useRef<boolean>(false);
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   const track = tracks[trackIndex];
 
-  // Load saved session on mount
   useEffect(() => {
-    const saved = loadSession();
-    if (saved) {
-      setShuffle(saved.shuffle);
-      setRepeat(saved.repeat);
-      setVolume(saved.volume);
-      resumePositionRef.current = saved.position;
+    const savedPlaylist = lsGet<SavedTrackMeta[]>(STORAGE_KEYS.playlist, []);
+    const savedTrackIdx = lsGet<number>(STORAGE_KEYS.currentTrack, 0);
+    const savedPosition = lsGet<number>(STORAGE_KEYS.position, 0);
+    const savedShuffle = lsGet<boolean>(STORAGE_KEYS.shuffle, false);
+    const savedRepeat = lsGet<boolean>(STORAGE_KEYS.repeat, false);
+    const savedVolume = lsGet<number>(STORAGE_KEYS.volume, 70);
+
+    setShuffle(savedShuffle);
+    setRepeat(savedRepeat);
+    if (typeof savedVolume === 'number') setVolume(savedVolume);
+
+    if (savedPlaylist.length > 0) {
+      setNeedsReselect(true);
+      resumePositionRef.current = savedPosition;
       shouldResumeRef.current = true;
-      setHasResumeSession(true);
+      setTrackIndex(savedTrackIdx);
+      if (!HAS_LS) {
+        setNotice('Your playlist will not be saved between sessions on this browser.');
+      }
     }
   }, []);
 
-  // Auto-load: try to reload from remembered folder on desktop
+  useEffect(() => { lsSet(STORAGE_KEYS.shuffle, shuffle); }, [shuffle]);
+  useEffect(() => { lsSet(STORAGE_KEYS.repeat, repeat); }, [repeat]);
+  useEffect(() => { lsSet(STORAGE_KEYS.volume, volume); }, [volume]);
   useEffect(() => {
-    if (autoLoaded) return;
-    setAutoLoaded(true);
-    const saved = loadSession();
-    const savedFolder = localStorage.getItem(FOLDER_KEY);
-    if (savedFolder && saved) {
-      // On desktop browsers that support showDirectoryPicker, we can try to re-open
-      // But permissions don't persist across sessions for security reasons.
-      // We show the resume indicator and let the user tap to re-select the folder.
-      // The file names are remembered so we can match them.
-      setHasResumeSession(true);
-    }
-  }, [autoLoaded]);
+    lsSet(STORAGE_KEYS.currentTrack, trackIndex);
+  }, [trackIndex]);
 
-  // Volume control
+  useEffect(() => {
+    if (tracks.length > 0) {
+      lsSet(STORAGE_KEYS.playlist, tracks.map((t) => ({
+        fileName: t.fileName,
+        fileSize: t.size,
+        lastModified: t.lastModified,
+      })));
+    } else {
+      if (HAS_LS) localStorage.removeItem(STORAGE_KEYS.playlist);
+    }
+  }, [tracks]);
+
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio) return;
-    audio.volume = volume / 100;
+    if (audio) audio.volume = volume / 100;
   }, [volume]);
 
-  // Play/pause control
+  useEffect(() => {
+    if (positionSaveRef.current) { clearInterval(positionSaveRef.current); positionSaveRef.current = null; }
+    if (playing && track) {
+      positionSaveRef.current = setInterval(() => {
+        const audio = audioRef.current;
+        if (audio) lsSet(STORAGE_KEYS.position, audio.currentTime);
+      }, 5000);
+    }
+    return () => { if (positionSaveRef.current) { clearInterval(positionSaveRef.current); positionSaveRef.current = null; } };
+  }, [playing, track]);
+
+  useEffect(() => {
+    function handleUnload() {
+      const audio = audioRef.current;
+      if (audio) lsSet(STORAGE_KEYS.position, audio.currentTime);
+    }
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      handleUnload();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      objectUrlsRef.current = [];
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    if (track) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.name,
+        artist: 'SchoolPortal-GES Player',
+      });
+    }
+    navigator.mediaSession.setActionHandler('play', () => setPlaying(true));
+    navigator.mediaSession.setActionHandler('pause', () => setPlaying(false));
+    navigator.mediaSession.setActionHandler('nexttrack', () => nextTrack());
+    navigator.mediaSession.setActionHandler('previoustrack', () => prevTrack());
+  }, [track]);
+
+  useEffect(() => {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+    }
+  }, [playing]);
+
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !track) return;
@@ -119,115 +203,137 @@ export function MusicPlayer() {
     }
   }, [playing, trackIndex, track]);
 
-  // Save session periodically while playing
   useEffect(() => {
-    if (savingTimerRef.current) clearInterval(savingTimerRef.current);
-    if (playing && track) {
-      savingTimerRef.current = setInterval(() => {
-        const audio = audioRef.current;
-        saveSession({
-          trackIndex,
-          position: audio?.currentTime ?? 0,
-          shuffle,
-          repeat,
-          volume,
-          trackNames: tracks.map((t) => t.fileName),
-          hasPrevious: true,
-        });
-      }, 3000);
+    const audio = audioRef.current;
+    if (!audio || !track) return;
+    if (shouldResumeRef.current === false && resumePositionRef.current > 0 && progress === 0) {
+      const handler = () => {
+        audio.currentTime = resumePositionRef.current;
+        setProgress(resumePositionRef.current);
+        resumePositionRef.current = 0;
+        audio.removeEventListener('loadedmetadata', handler);
+      };
+      audio.addEventListener('loadedmetadata', handler);
+      return () => audio.removeEventListener('loadedmetadata', handler);
     }
-    return () => { if (savingTimerRef.current) clearInterval(savingTimerRef.current); };
-  }, [playing, track, trackIndex, shuffle, repeat, volume, tracks]);
+  }, [track, progress]);
 
-  // Save session on unmount/page unload
   useEffect(() => {
-    function handleUnload() {
-      const audio = audioRef.current;
-      if (track) {
-        saveSession({
-          trackIndex,
-          position: audio?.currentTime ?? 0,
-          shuffle,
-          repeat,
-          volume,
-          trackNames: tracks.map((t) => t.fileName),
-          hasPrevious: true,
-        });
+    if (!track || tracks.length < 2) return;
+    const nextIdx = pickNextTrackStatic();
+    const nextTrack = tracks[nextIdx];
+    if (nextTrack && nextTrack.url !== track.url) {
+      if (preloadRef.current) {
+        preloadRef.current.src = nextTrack.url;
+        preloadRef.current.preload = 'auto';
+        preloadRef.current.load();
       }
     }
-    window.addEventListener('beforeunload', handleUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleUnload);
-      handleUnload();
-    };
-  }, [track, trackIndex, shuffle, repeat, volume, tracks]);
+  }, [track, trackIndex, tracks, shuffle]);
 
-  // Cleanup object URLs on unmount
-  useEffect(() => {
-    return () => {
-      objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
-      objectUrlsRef.current = [];
-    };
-  }, []);
+  function pickNextTrackStatic(): number {
+    if (tracks.length === 0) return 0;
+    if (tracks.length === 1) return 0;
+    if (shuffle) {
+      const unplayed = tracks.map((_, i) => i).filter((i) => !playedHistoryRef.current.includes(i));
+      if (unplayed.length === 0) {
+        const candidates = tracks.map((_, i) => i).filter((i) => i !== trackIndex);
+        return candidates[Math.floor(Math.random() * candidates.length)] ?? 0;
+      }
+      return unplayed[Math.floor(Math.random() * unplayed.length)] ?? 0;
+    }
+    return (trackIndex + 1) % tracks.length;
+  }
 
-  const handleFiles = useCallback((files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const audioFiles = Array.from(files).filter(
+  const pickNextTrack = useCallback((): number => {
+    return pickNextTrackStatic();
+  }, [tracks.length, trackIndex, shuffle]);
+
+  const handleFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files) return;
+    const fileArray = Array.from(files);
+    if (fileArray.length === 0) return;
+    const audioFiles = fileArray.filter(
       (f) => f.type.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac|aac|webm|opus)$/i.test(f.name),
     );
     if (audioFiles.length === 0) return;
 
-    const saved = loadSession();
-    const savedNames = saved?.trackNames ?? [];
+    const savedPlaylist = lsGet<SavedTrackMeta[]>(STORAGE_KEYS.playlist, []);
 
-    const newTracks = audioFiles.map((f) => {
+    const newTracks: LoadedTrack[] = audioFiles.map((f) => {
       const url = URL.createObjectURL(f);
       objectUrlsRef.current.push(url);
       return {
-        name: f.name.replace(/\.[^.]+$/, ''),
+        name: stripExt(f.name),
         fileName: f.name,
         url,
         size: f.size,
+        lastModified: f.lastModified,
+        duration: 0,
       };
     });
 
     setTracks((prev) => {
-      const combined = [...prev, ...newTracks];
       const wasEmpty = prev.length === 0;
+      const combined = [...prev, ...newTracks];
 
-      // Try to resume from saved session
-      if (wasEmpty && shouldResumeRef.current && saved && savedNames.length > 0) {
-        const matchIdx = combined.findIndex((t) => t.fileName === savedNames[saved.trackIndex]);
-        if (matchIdx >= 0) {
-          setTrackIndex(matchIdx);
-          setProgress(saved.position);
-          playedHistoryRef.current = [matchIdx];
-          shouldResumeRef.current = false;
-        } else {
-          // Saved track not found — skip to next available
-          setMissingFile(savedNames[saved.trackIndex] ?? null);
-          setTrackIndex(0);
-          shouldResumeRef.current = false;
+      if (wasEmpty && shouldResumeRef.current && savedPlaylist.length > 0) {
+        const reordered: LoadedTrack[] = [];
+        const used = new Set<number>();
+        for (const meta of savedPlaylist) {
+          const matchIdx = combined.findIndex((t, i) =>
+            !used.has(i) && t.fileName === meta.fileName && t.size === meta.fileSize
+          );
+          if (matchIdx >= 0) {
+            reordered.push(combined[matchIdx]);
+            used.add(matchIdx);
+          }
         }
-      } else if (wasEmpty) {
+        combined.forEach((t, i) => { if (!used.has(i)) reordered.push(t); });
+
+        const savedIdx = lsGet<number>(STORAGE_KEYS.currentTrack, 0);
+        setTrackIndex(Math.min(savedIdx, reordered.length - 1));
+        playedHistoryRef.current = [Math.min(savedIdx, reordered.length - 1)];
+        shouldResumeRef.current = false;
+        setNeedsReselect(false);
+        return reordered;
+      }
+
+      if (wasEmpty) {
         setTrackIndex(0);
         playedHistoryRef.current = [0];
         setPlaying(true);
+        setNeedsReselect(false);
       }
       return combined;
     });
   }, []);
 
-  // Auto-play when track changes and we have a resume position
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !track) return;
-    if (shouldResumeRef.current === false && resumePositionRef.current > 0 && progress === 0) {
-      audio.currentTime = resumePositionRef.current;
-      setProgress(resumePositionRef.current);
-      resumePositionRef.current = 0;
+  async function openFilePicker() {
+    if ('showOpenFilePicker' in window) {
+      try {
+        const files = await (window as any).showOpenFilePicker({
+          multiple: true,
+          types: [{
+            description: 'Audio Files',
+            accept: { 'audio/*': ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'] },
+          }],
+        });
+        const fileObjs: File[] = [];
+        for (const handle of files) {
+          try {
+            const f = await handle.getFile();
+            fileObjs.push(f);
+          } catch { /* skip */ }
+        }
+        if (fileObjs.length > 0) handleFiles(fileObjs);
+        return;
+      } catch (err) {
+        if ((err as DOMException).name === 'AbortError') return;
+      }
     }
-  }, [track, progress]);
+    fileInputRef.current?.click();
+  }
 
   const handleTimeUpdate = useCallback(() => {
     const audio = audioRef.current;
@@ -236,24 +342,19 @@ export function MusicPlayer() {
     setDuration(audio.duration || 0);
   }, []);
 
-  const pickNextTrack = useCallback((): number => {
-    if (tracks.length === 0) return 0;
-    if (tracks.length === 1) return 0;
-
-    if (shuffle) {
-      // Pick random unplayed track
-      const unplayed = tracks.map((_, i) => i).filter((i) => !playedHistoryRef.current.includes(i));
-      if (unplayed.length === 0) {
-        // All played — reshuffle
-        playedHistoryRef.current = [trackIndex];
-        const candidates = tracks.map((_, i) => i).filter((i) => i !== trackIndex);
-        return candidates[Math.floor(Math.random() * candidates.length)];
+  const handleLoadedMeta = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    setDuration(audio.duration || 0);
+    setTracks((prev) => {
+      if (prev[trackIndex]) {
+        const updated = [...prev];
+        updated[trackIndex] = { ...updated[trackIndex], duration: audio.duration || 0 };
+        return updated;
       }
-      return unplayed[Math.floor(Math.random() * unplayed.length)];
-    } else {
-      return (trackIndex + 1) % tracks.length;
-    }
-  }, [tracks.length, trackIndex, shuffle]);
+      return prev;
+    });
+  }, [trackIndex]);
 
   const handleEnded = useCallback(() => {
     if (repeat) {
@@ -264,16 +365,21 @@ export function MusicPlayer() {
       }
       return;
     }
-
     if (tracks.length === 0) return;
 
     const nextIdx = pickNextTrack();
     playedHistoryRef.current = [...playedHistoryRef.current, nextIdx];
     setProgress(0);
     setTrackIndex(nextIdx);
-    // Ensure playback continues
     setPlaying(true);
-  }, [repeat, tracks.length, pickNextTrack]);
+
+    setTimeout(() => {
+      const audio = audioRef.current;
+      if (audio && playing) {
+        audio.play().catch(() => {});
+      }
+    }, 100);
+  }, [repeat, tracks.length, pickNextTrack, playing]);
 
   function handleSeek(e: React.MouseEvent<HTMLDivElement>) {
     const audio = audioRef.current;
@@ -290,10 +396,17 @@ export function MusicPlayer() {
     const next = pickNextTrack();
     playedHistoryRef.current = [...playedHistoryRef.current, next];
     setTrackIndex(next);
+    setPlaying(true);
   }
 
   function prevTrack() {
     if (tracks.length === 0) return;
+    const audio = audioRef.current;
+    if (audio && audio.currentTime > 3) {
+      audio.currentTime = 0;
+      setProgress(0);
+      return;
+    }
     setProgress(0);
     setTrackIndex((i) => (i - 1 + tracks.length) % tracks.length);
   }
@@ -309,10 +422,8 @@ export function MusicPlayer() {
     setShuffle((prev) => {
       const newVal = !prev;
       if (newVal) {
-        // Shuffle ON: randomize remaining unplayed tracks
         playedHistoryRef.current = playedHistoryRef.current.filter((h) => h !== trackIndex);
       } else {
-        // Shuffle OFF: resume sequential from current
         playedHistoryRef.current = [trackIndex];
       }
       return newVal;
@@ -331,6 +442,12 @@ export function MusicPlayer() {
         setPlaying(false);
         setProgress(0);
         setTrackIndex(0);
+        setNeedsReselect(false);
+        if (HAS_LS) {
+          localStorage.removeItem(STORAGE_KEYS.playlist);
+          localStorage.removeItem(STORAGE_KEYS.currentTrack);
+          localStorage.removeItem(STORAGE_KEYS.position);
+        }
       } else if (index === trackIndex) {
         setTrackIndex(Math.min(index, filtered.length - 1));
         setProgress(0);
@@ -349,37 +466,31 @@ export function MusicPlayer() {
     setProgress(0);
     setTrackIndex(0);
     playedHistoryRef.current = [];
-    setHasResumeSession(false);
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
-  }
-
-  function onPointerDown(e: React.PointerEvent) {
-    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }
-  function onPointerMove(e: React.PointerEvent) {
-    if (!dragRef.current) return;
-    const x = Math.max(0, Math.min(window.innerWidth - 44, e.clientX - dragRef.current.dx));
-    const y = Math.max(0, Math.min(window.innerHeight - 44, e.clientY - dragRef.current.dy));
-    setPos({ x, y });
-  }
-  function onPointerUp() { dragRef.current = null; }
-
-  function handleResumeClick() {
-    if (hasResumeSession && tracks.length === 0) {
-      // Need to re-select folder
-      fileInputRef.current?.click();
-    } else if (hasResumeSession && tracks.length > 0) {
-      setPlaying(true);
-    } else {
-      setOpen((v) => !v);
+    setNeedsReselect(false);
+    setShowPlaylist(false);
+    if (HAS_LS) {
+      localStorage.removeItem(STORAGE_KEYS.playlist);
+      localStorage.removeItem(STORAGE_KEYS.currentTrack);
+      localStorage.removeItem(STORAGE_KEYS.position);
     }
   }
 
+  useEffect(() => {
+    if (!open) return;
+    function handleClickOutside(e: MouseEvent) {
+      const target = e.target as Node;
+      if (panelRef.current && !panelRef.current.contains(target)) {
+        const btn = document.getElementById('music-float-btn');
+        if (btn && btn.contains(target)) return;
+        setOpen(false);
+        setShowPlaylist(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
   const pct = duration > 0 ? (progress / duration) * 100 : 0;
-  const panelLeft = Math.min(pos.x - 230, window.innerWidth - 300);
-  const panelTop = Math.max(10, pos.y - 210);
-  const showResumeIndicator = hasResumeSession && !playing;
 
   return (
     <>
@@ -394,60 +505,42 @@ export function MusicPlayer() {
           e.target.value = '';
         }}
       />
-      <input
-        ref={dirInputRef}
-        type="file"
-        // @ts-expect-error webkitdirectory is a non-standard attribute
-        webkitdirectory=""
-        directory=""
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          handleFiles(e.target.files);
-          e.target.value = '';
-          if (e.target.files && e.target.files.length > 0) {
-            const folder = (e.target.files[0] as any).webkitRelativePath?.split('/')[0];
-            if (folder) localStorage.setItem(FOLDER_KEY, folder);
-          }
-        }}
-      />
       <audio
         ref={audioRef}
         src={track?.url}
         onTimeUpdate={handleTimeUpdate}
         onEnded={handleEnded}
-        onLoadedMetadata={handleTimeUpdate}
+        onLoadedMetadata={handleLoadedMeta}
+        preload="auto"
         onError={() => {
-          if (track) {
-            setMissingFile(track.fileName);
-            // Skip to next track automatically
-            if (tracks.length > 1) {
-              const next = pickNextTrack();
-              playedHistoryRef.current = [...playedHistoryRef.current, next];
-              setTrackIndex(next);
-              setProgress(0);
-            } else {
-              setPlaying(false);
-            }
+          if (track && tracks.length > 1) {
+            const next = pickNextTrack();
+            playedHistoryRef.current = [...playedHistoryRef.current, next];
+            setTrackIndex(next);
+            setProgress(0);
+          } else {
+            setPlaying(false);
           }
         }}
       />
+      <audio ref={preloadRef} preload="auto" className="hidden" />
 
       <button
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onClick={handleResumeClick}
-        className="fixed z-40 flex h-11 w-11 items-center justify-center rounded-full text-white shadow-lg transition-transform hover:scale-105"
-        style={{ left: pos.x, top: pos.y, background: 'var(--color-primary)', touchAction: 'none' }}
+        id="music-float-btn"
+        onClick={() => setOpen((v) => !v)}
+        className="fixed bottom-4 right-4 z-40 flex h-9 w-9 items-center justify-center rounded-full text-white shadow-lg transition-opacity hover:opacity-100"
+        style={{
+          background: 'var(--color-primary)',
+          opacity: open ? 1 : 0.6,
+        }}
         aria-label="Music player"
       >
         <div className="relative">
-          <Music size={20} className={playing ? 'animate-pulse-ring' : ''} />
-          {showResumeIndicator && (
-            <span className="absolute -right-1 -top-1 flex h-3 w-3">
+          <Music size={18} />
+          {playing && (
+            <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
-              <span className="relative inline-flex h-3 w-3 rounded-full bg-green-500" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green-500" />
             </span>
           )}
         </div>
@@ -455,27 +548,40 @@ export function MusicPlayer() {
 
       {open && (
         <div
-          className="fixed z-40 w-72 rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl dark:border-gray-800 dark:bg-gray-900"
-          style={{ left: panelLeft, top: panelTop }}
+          ref={panelRef}
+          className="fixed bottom-16 right-4 z-40 w-72 rounded-2xl border border-gray-200 bg-white p-4 shadow-2xl dark:border-gray-800 dark:bg-gray-900"
         >
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <FileAudio size={16} style={{ color: 'var(--color-primary)' }} />
               <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">Music Player</span>
             </div>
-            <button onClick={() => setOpen(false)} className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
+            <button onClick={() => { setOpen(false); setShowPlaylist(false); }} className="rounded p-1 text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800">
               <X size={16} />
             </button>
           </div>
 
-          {missingFile && (
-            <div className="mb-3 flex items-start gap-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+          {notice && (
+            <div className="mb-3 flex items-start gap-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
-              <span>Previous song "{missingFile}" not found. Playing next available track.</span>
+              <span>{notice}</span>
             </div>
           )}
 
-          {track ? (
+          {needsReselect && tracks.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 py-6 text-center">
+              <FolderOpen size={32} className="text-gray-300 dark:text-gray-600" />
+              <p className="text-sm text-gray-600 dark:text-gray-300">Your playlist is ready. Tap Play to resume.</p>
+              <p className="text-xs text-gray-400">Select your music folder again to restore your playlist and continue from where you left off.</p>
+              <button
+                onClick={openFilePicker}
+                className="flex items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                style={{ background: 'var(--color-primary)' }}
+              >
+                <Play size={14} /> Reselect Music
+              </button>
+            </div>
+          ) : track ? (
             <>
               <div className="mb-1 min-w-0">
                 <p className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{track.name}</p>
@@ -517,82 +623,85 @@ export function MusicPlayer() {
                 <Volume2 size={16} className="shrink-0 text-gray-400" />
                 <input type="range" min={0} max={100} value={volume} onChange={(e) => setVolume(parseInt(e.target.value))} className="flex-1 accent-current" style={{ color: 'var(--color-primary)' }} />
               </div>
+
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => setShowPlaylist((v) => !v)}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                  title="Playlist"
+                >
+                  <ListMusic size={14} /> Playlist
+                </button>
+                <button
+                  onClick={openFilePicker}
+                  className="flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                  title="Add more music"
+                >
+                  <FolderOpen size={14} /> Folder
+                </button>
+                {tracks.length > 0 && (
+                  <button
+                    onClick={clearAll}
+                    className="flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                    title="Clear all"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </div>
+
+              {showPlaylist && tracks.length > 0 && (
+                <div className="mt-3 max-h-44 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
+                  {tracks.map((t, i) => (
+                    <div
+                      key={`${t.url}-${i}`}
+                      className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${
+                        i === trackIndex ? 'font-medium' : 'text-gray-600 dark:text-gray-400'
+                      }`}
+                      style={i === trackIndex ? { background: 'color-mix(in srgb, var(--color-primary) 8%, transparent)' } : undefined}
+                    >
+                      <button onClick={() => selectTrack(i)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                        <span className="w-4 shrink-0 text-right text-gray-400">{i + 1}</span>
+                        {i === trackIndex && playing ? (
+                          <Pause size={12} className="shrink-0" style={{ color: 'var(--color-primary)' }} />
+                        ) : (
+                          <Play size={12} className="shrink-0 text-gray-400" />
+                        )}
+                        <span className="truncate">{t.name}</span>
+                      </button>
+                      <span className="shrink-0 text-[10px] text-gray-400">{formatTime(t.duration)}</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); removeTrack(i); }}
+                        className="shrink-0 text-gray-300 hover:text-red-500 dark:text-gray-600"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {tracks.length > 0 && (
+                <p className="mt-2 text-center text-[10px] text-gray-400">
+                  {tracks.length} track{tracks.length !== 1 ? 's' : ''}
+                  {shuffle ? ' · Shuffle ON' : ''}
+                  {repeat ? ' · Repeat ON' : ''}
+                </p>
+              )}
             </>
-          ) : hasResumeSession ? (
-            <div className="flex flex-col items-center gap-2 py-6 text-center">
-              <FolderOpen size={32} className="text-gray-300 dark:text-gray-600" />
-              <p className="text-sm text-gray-500 dark:text-gray-400">Resume your last session</p>
-              <p className="text-xs text-gray-400">Select your music folder to restore your playlist and continue from where you left off.</p>
-            </div>
           ) : (
-            <div className="flex flex-col items-center gap-2 py-6 text-center">
+            <div className="flex flex-col items-center gap-3 py-6 text-center">
               <FolderOpen size={32} className="text-gray-300 dark:text-gray-600" />
               <p className="text-sm text-gray-500 dark:text-gray-400">No music loaded yet.</p>
               <p className="text-xs text-gray-400">Click below to browse your device.</p>
-            </div>
-          )}
-
-          <div className="mt-3 flex gap-2">
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90"
-              style={{ background: 'var(--color-primary)' }}
-            >
-              <FolderOpen size={14} /> Load Music
-            </button>
-            <button
-              onClick={() => dirInputRef.current?.click()}
-              className="flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
-              title="Select entire folder"
-            >
-              <FileAudio size={14} /> Folder
-            </button>
-            {tracks.length > 0 && (
               <button
-                onClick={clearAll}
-                className="flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
-                title="Clear all"
+                onClick={openFilePicker}
+                className="flex items-center justify-center gap-1.5 rounded-lg px-4 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                style={{ background: 'var(--color-primary)' }}
               >
-                <Trash2 size={14} />
+                <FolderOpen size={14} /> Load Music
               </button>
-            )}
-          </div>
-
-          {tracks.length > 0 && (
-            <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-gray-100 dark:border-gray-800">
-              {tracks.map((t, i) => (
-                <div
-                  key={`${t.url}-${i}`}
-                  className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${
-                    i === trackIndex ? 'font-medium' : 'text-gray-600 dark:text-gray-400'
-                  }`}
-                  style={i === trackIndex ? { background: 'color-mix(in srgb, var(--color-primary) 8%, transparent)' } : undefined}
-                >
-                  <button onClick={() => selectTrack(i)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-                    {i === trackIndex && playing ? (
-                      <Pause size={12} className="shrink-0" style={{ color: 'var(--color-primary)' }} />
-                    ) : (
-                      <Play size={12} className="shrink-0 text-gray-400" />
-                    )}
-                    <span className="truncate">{t.name}</span>
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); removeTrack(i); }}
-                    className="shrink-0 text-gray-300 hover:text-red-500 dark:text-gray-600"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
             </div>
-          )}
-
-          {tracks.length > 0 && (
-            <p className="mt-2 text-center text-[10px] text-gray-400">
-              {tracks.length} track{tracks.length !== 1 ? 's' : ''} loaded
-              {shuffle ? ' · Shuffle ON' : ''}
-              {repeat ? ' · Repeat ON' : ''}
-            </p>
           )}
         </div>
       )}

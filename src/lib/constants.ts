@@ -39,7 +39,7 @@ export const SECURITY_QUESTION_SUGGESTIONS = [
   'What was the name of your primary school?',
   'What is your favourite food?',
   'In what town were you born?',
-  'What is your father\'s middle name?',
+  'What is your father\s middle name?',
 ];
 
 export const STAFF_POSITION_LABELS: Record<string, string> = {
@@ -65,12 +65,12 @@ export const ROLE_LABELS: Record<string, string> = {
 };
 
 export const OFFICE_ROLE_LABELS: Record<string, string> = {
-  emis_officer: 'EMIS Officer — District Education Office',
-  district_director: 'District Director (Education) — District Education Office',
-  director_admin: 'District Director (Administration) — District Education Office',
-  director_hr: 'District Director (Human Resource) — District Education Office',
-  circuit_supervisor: 'Circuit Supervisor — District Education Office',
-  district_education_officer: 'District Education Officer — District Education Office',
+  emis_officer: 'EMIS Officer — DEO',
+  district_director: 'District Director (Education) — DEO',
+  director_admin: 'District Director (Administration) — DEO',
+  director_hr: 'District Director (Human Resource) — DEO',
+  circuit_supervisor: 'Circuit Supervisor — DEO',
+  district_education_officer: 'District Education Officer — DEO',
 };
 
 export const OFFICE_ROLES = [

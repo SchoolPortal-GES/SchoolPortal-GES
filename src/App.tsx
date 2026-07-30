@@ -1,6 +1,7 @@
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { AppearanceProvider } from '@/lib/appearance-context';
 import { NavProvider, useNav } from '@/lib/nav-context';
+import { ToastProvider } from '@/lib/toast-context';
 import { LoginScreen } from '@/components/LoginScreen';
 import { ProfileCompletion } from '@/components/ProfileCompletion';
 import { LoadingScreen, Dashboard } from '@/components/Dashboard';
@@ -101,7 +102,9 @@ export default function App() {
     <AuthProvider>
       <AppearanceProvider>
         <NavProvider>
-          <AppRoutes />
+          <ToastProvider>
+            <AppRoutes />
+          </ToastProvider>
         </NavProvider>
       </AppearanceProvider>
     </AuthProvider>
