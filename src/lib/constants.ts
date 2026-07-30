@@ -39,7 +39,7 @@ export const SECURITY_QUESTION_SUGGESTIONS = [
   'What was the name of your primary school?',
   'What is your favourite food?',
   'In what town were you born?',
-  'What is your father\s middle name?',
+  'What is your father\'s middle name?',
 ];
 
 export const STAFF_POSITION_LABELS: Record<string, string> = {
