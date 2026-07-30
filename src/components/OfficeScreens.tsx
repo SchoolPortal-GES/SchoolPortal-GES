@@ -70,7 +70,7 @@ export function DistrictDataSharingScreen({ onBack }: { onBack: () => void }) {
       await authApi.toggleDistrictDataSharing(category, !currentEnabled);
       setSuccess(`${DATA_SHARING_CATEGORIES.find((c) => c.key === category)?.label ?? category} is now ${!currentEnabled ? 'ON' : 'OFF'}.`);
       await load();
-      setTimeout(() => setSuccess(null), 3000);
+      setTimeout(() => setSuccess(null), 5000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not update toggle.');
     }
@@ -106,7 +106,7 @@ export function DistrictDataSharingScreen({ onBack }: { onBack: () => void }) {
               <h3 className="font-semibold text-gray-900 dark:text-gray-100">Data Sharing Controls</h3>
             </div>
             <p className="mb-4 text-sm text-gray-600 dark:text-gray-400">
-              Control which categories of your school's data are visible to the District Education Office.
+              Control which categories of your school's data are visible to the DEO.
               All toggles default to OFF. Changes take effect immediately.
             </p>
             <div className="space-y-3">
@@ -325,7 +325,7 @@ export function OfficeUserManagementScreen({ onBack }: { onBack: () => void }) {
       {loading ? (
         <div className="flex justify-center py-12"><Spinner className="text-primary-600" /></div>
       ) : users.length === 0 ? (
-        <EmptyState title="No Office users" message="Register District Education Office staff to get started." />
+        <EmptyState title="No Office users" message="Register DEO staff to get started." />
       ) : (
         <div className="space-y-3">
           {users.map((u) => (
